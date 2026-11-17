@@ -1,0 +1,9 @@
+{
+  "baseline_band_abs_z": 0.5,
+  "change_abs_z": 2,
+  "consecutive_windows": 2,
+  "min_coverage_percent": 98,
+  "higher_pattern": {},
+  "mapping_evidence": "",
+  "task_context": {}
+}

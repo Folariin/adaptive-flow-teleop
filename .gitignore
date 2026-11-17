@@ -1,0 +1,11 @@
+/data/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+!.env.sample
+.venv/
+venv/
+env/
+ENV/

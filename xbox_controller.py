@@ -1,8 +1,14 @@
+import argparse
+import csv
 import ctypes
 import time
 from ctypes import wintypes
+from datetime import datetime
+from pathlib import Path
 
 from lerobot.robots.so101_follower import SO101Follower, SO101FollowerConfig
+
+from recording_clock import write_clock_metadata
 
 PORT = "COM24"
 ROBOT_ID = "my_awesome_follower_arm"
@@ -86,6 +92,11 @@ def find_controller():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Manually operate the Xbox teleoperation controller.")
+    parser.add_argument("--live-output-dir", type=Path, help="existing task directory for live CSV sharing")
+    args = parser.parse_args()
+    if args.live_output_dir is not None and not args.live_output_dir.is_dir():
+        parser.error("--live-output-dir must be an existing directory")
     controller_index = find_controller()
     if controller_index is None:
         raise RuntimeError("No Xbox/XInput controller detected.")
@@ -110,6 +121,7 @@ def main():
     )
     robot = SO101Follower(config)
 
+    log_file = None
     try:
         robot.connect()
 
@@ -128,8 +140,25 @@ def main():
         for joint, value in target.items():
             print(f"  {joint:14s}: {value:7.2f}")
 
+        data_dir = args.live_output_dir or Path(__file__).resolve().parent / "data"
+        data_dir.mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        log_path = data_dir / f"controller_inputs_{timestamp}.csv"
+        log_file = log_path.open("x", newline="", encoding="utf-8")
+        log_row = csv.writer(log_file).writerow
+        log_row((
+            "perf_counter_s",
+            "lx_raw", "ly_raw", "rx_raw", "ry_raw",
+            "lx_deadzone", "ly_deadzone", "rx_deadzone", "ry_deadzone",
+            "lt", "rt", "x_pressed", "rb_pressed",
+            *(f"{joint}_target" for joint in target),
+        ))
+        print(f"Logging controller inputs to {log_path}")
+        write_clock_metadata(log_path)
+
         period = 1.0 / FPS
         last = time.perf_counter()
+        last_flush = last
 
         while True:
             loop_start = time.perf_counter()
@@ -147,21 +176,25 @@ def main():
                 print("B pressed. Exiting.")
                 break
 
-            lx = apply_deadzone(norm_stick(gp.sThumbLX))
-            ly = apply_deadzone(norm_stick(gp.sThumbLY))
-            rx = apply_deadzone(norm_stick(gp.sThumbRX))
-            ry = apply_deadzone(norm_stick(gp.sThumbRY))
+            lx_raw, ly_raw = gp.sThumbLX, gp.sThumbLY
+            rx_raw, ry_raw = gp.sThumbRX, gp.sThumbRY
+            lx = apply_deadzone(norm_stick(lx_raw))
+            ly = apply_deadzone(norm_stick(ly_raw))
+            rx = apply_deadzone(norm_stick(rx_raw))
+            ry = apply_deadzone(norm_stick(ry_raw))
             lt = norm_trigger(gp.bLeftTrigger)
             rt = norm_trigger(gp.bRightTrigger)
+            x_pressed = bool(gp.wButtons & XINPUT_GAMEPAD_X)
+            rb_pressed = bool(gp.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER)
 
             target["shoulder_pan"] += lx * BODY_SPEED * dt
             target["shoulder_lift"] += ly * BODY_SPEED * dt
             target["elbow_flex"] += ry * BODY_SPEED * dt
             target["wrist_flex"] += rx * BODY_SPEED * dt
 
-            if gp.wButtons & XINPUT_GAMEPAD_X:
+            if x_pressed:
                 target["wrist_roll"] -= WRIST_ROLL_SPEED * dt
-            if gp.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER:
+            if rb_pressed:
                 target["wrist_roll"] += WRIST_ROLL_SPEED * dt
 
             target["gripper"] += (rt - lt) * GRIPPER_SPEED * dt
@@ -187,6 +220,16 @@ def main():
             }
 
             robot.send_action(action)
+            log_row((
+                loop_start,
+                lx_raw, ly_raw, rx_raw, ry_raw,
+                lx, ly, rx, ry,
+                lt, rt, int(x_pressed), int(rb_pressed),
+                *target.values(),
+            ))
+            if args.live_output_dir is not None and loop_start - last_flush >= 0.5:
+                log_file.flush()
+                last_flush = loop_start
 
             elapsed = time.perf_counter() - loop_start
             if elapsed < period:
@@ -196,9 +239,13 @@ def main():
         print("\nCtrl+C received. Exiting.")
 
     finally:
-        if robot.is_connected:
-            robot.disconnect()
-        print("Disconnected safely.")
+        try:
+            if robot.is_connected:
+                robot.disconnect()
+            print("Disconnected safely.")
+        finally:
+            if log_file is not None:
+                log_file.close()
 
 
 if __name__ == "__main__":
