@@ -15,7 +15,7 @@ from gsr_features import Sample, calculate_windows, estimate_windows
 class ConductanceTests(unittest.TestCase):
     def test_seeed_equation_with_provisional_reference(self):
         self.assertAlmostEqual(estimated_resistance_ohms(495, 649), 130779.22077922078)
-        self.assertAlmostEqual(estimated_conductance_us(495, 649), 7.646469215491559, places=4)
+        self.assertAlmostEqual(estimated_conductance_us(495, 649), 7.646474677259186, places=4)
 
     def test_derived_conductance_is_positive_and_increases_as_adc_falls(self):
         self.assertGreater(estimated_conductance_us(495, 649), estimated_conductance_us(570, 649))
