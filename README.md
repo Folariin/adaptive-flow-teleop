@@ -419,3 +419,55 @@ demand and task strategy can also alter these features.
 
 Run the targeted tests with
 `python -B -m unittest -v test_joystick_interpretation test_replay_session test_gsr_interpretation test_live_features test_fuse_features`.
+
+## Optional provisional Grove GSR conductance estimates
+
+The offline analyzer can **optionally** derive estimated conductance from each
+individual raw ADC sample using Seeed Studio's Grove GSR equation. The original
+raw GSR CSVs, raw-ADC window means, baseline profiles, and live classifiers are
+not modified by this option.
+
+```powershell
+python gsr_features.py "data/gsr_recording.csv" --calibration-adc 649 --export
+python gsr_features.py "data/gsr_recording.csv" --baseline "data/gsr_resting.csv" --calibration-adc 649 --export
+python -m unittest -v test_gsr_features test_gsr_conductance
+```
+
+**649 is a provisional, setup-specific unworn reference from a preliminary
+sensor-response check, not a verified calibration.** Use this number only for
+recordings from the **same unchanged potentiometer setting, sensor setup, and
+10-bit ADC configuration**, after confirming compatibility. Do not apply 649
+to recordings made with earlier potentiometer settings or a different ADC
+resolution. Recheck the unworn reference when beginning new measurement setups.
+
+For each sample with raw ADC `A` and unworn reference `C`, compute
+`R_ohms = ((1024 + 2*A)*10000)/(C - A)`, then
+`estimated_conductance_us = 1000000/R_ohms`.
+The conversion is **undefined for A == C** and yields unphysical negative
+resistance for `A > C`. Such samples receive **no estimate**; the estimated
+window mean is blank if **any** sample is invalid, and valid/invalid counts
+are reported. A missing or invalid baseline also makes the estimated
+baseline delta blank. This is intentional: silently dropping invalid samples
+could bias mean conductance. The estimated mean is the mean of *per-sample*
+conversions, not the conversion of mean ADC (the formula is nonlinear).
+
+With `--export`, the analyzer creates its existing raw ADC window CSV plus a
+separate `*_gsr_conductance_estimates.csv` containing the reference, raw
+mean, valid/invalid counts, mean estimated conductance in µS, and optional
+baseline mean and change in estimated µS. The `--calibration-adc` argument
+must be an integer from 1 through 1023, matching 10-bit input.
+
+**Scientific limits:** An estimated µS value from this board is not a validated
+absolute skin conductance level (SCL), a skin conductance response (SCR), an
+arousal score, or a ground-truth mental-workload label. SCL and SCR extraction
+require their own validated preprocessing and feature definitions. Electrode
+position and pressure, movement, environmental conditions, physiology, and
+calibration influence the signal. The current candidate arousal labels remain
+experimental and **are not recalculated** using this optional conversion.
+
+Sources:
+- Seeed Studio Grove GSR documentation: https://wiki.seeedstudio.com/Grove-GSR_Sensor/
+- Boucsein et al. (2012), *Publication recommendations for electrodermal
+  measurements*, https://doi.org/10.1111/j.1469-8986.2012.01384.x
+- Critchley (2002), *Electrodermal responses: what happens in the brain*,
+  https://pubmed.ncbi.nlm.nih.gov/11954558/
