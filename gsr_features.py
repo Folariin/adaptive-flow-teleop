@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from gsr_logger import COLUMNS, TimingChecks
+from gsr_conductance import summarize_conductance, validate_calibration_adc
 
 
 ANALYSIS_DIR = Path(__file__).resolve().parent / "analysis"
@@ -33,6 +34,19 @@ class Window(NamedTuple):
     mean_gsr_raw: float | None
     baseline_mean_gsr_raw: float | None
     difference_from_baseline_raw: float | None
+
+
+class ConductanceWindow(NamedTuple):
+    start_s: float
+    end_s: float
+    sample_count: int
+    mean_gsr_raw: float | None
+    calibration_adc: int
+    valid_conductance_samples: int
+    invalid_conductance_samples: int
+    mean_estimated_conductance_us: float | None
+    baseline_mean_estimated_conductance_us: float | None
+    difference_from_baseline_estimated_conductance_us: float | None
 
 
 class RecordingTimingChecks(TimingChecks):
@@ -123,6 +137,53 @@ def calculate_windows(
         windows.append(Window(start, end, right - left, average, baseline_mean, difference))
 
 
+def estimate_windows(
+    samples: Sequence[Sample],
+    windows: Sequence[Window],
+    calibration_adc: int,
+    baseline_samples: Sequence[Sample] | None = None,
+) -> list[ConductanceWindow]:
+    """Compute optional estimates per sample, not from mean ADC.
+
+    Any invalid sample (ADC >= calibration) invalidates that window's
+    estimated mean rather than excluding it without notice.
+    """
+    validate_calibration_adc(calibration_adc)
+    baseline_mean = None
+    if baseline_samples is not None:
+        baseline_mean, _, _ = summarize_conductance(
+            (sample.raw for sample in baseline_samples), calibration_adc
+        )
+    if not samples:
+        return []
+    timestamps = [sample.pc_seconds for sample in samples]
+    origin = timestamps[0]
+    converted = []
+    for window in windows:
+        left = bisect_left(timestamps, origin + window.start_s)
+        right = bisect_right(timestamps, origin + window.end_s)
+        mean, valid, invalid = summarize_conductance(
+            (sample.raw for sample in samples[left:right]), calibration_adc
+        )
+        delta = mean - baseline_mean if mean is not None and baseline_mean is not None else None
+        converted.append(ConductanceWindow(
+            window.start_s, window.end_s, window.sample_count, window.mean_gsr_raw,
+            calibration_adc, valid, invalid, mean, baseline_mean, delta,
+        ))
+    return converted
+
+
+def export_estimated_windows(recording: Path, windows: Sequence[ConductanceWindow]) -> Path:
+    ANALYSIS_DIR.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    path = ANALYSIS_DIR / f"{recording.stem}_{timestamp}_gsr_conductance_estimates.csv"
+    with path.open("x", newline="", encoding="utf-8") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(ConductanceWindow._fields)
+        writer.writerows(windows)
+    return path
+
+
 def export_windows(recording: Path, windows: Sequence[Window]) -> Path:
     ANALYSIS_DIR.mkdir(exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -145,6 +206,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--step-seconds", type=float, default=DEFAULT_STEP_SECONDS, help="window step (default: 5)")
     parser.add_argument("--baseline", type=Path, help="resting GSR CSV from the same logger")
     parser.add_argument("--export", action="store_true", help="save window results to analysis/")
+    parser.add_argument(
+        "--calibration-adc", type=int, metavar="ADC",
+        help="opt in to provisional Seeed conductance estimates using unworn 10-bit reference (e.g. 649)",
+    )
     args = parser.parse_args(argv)
     try:
         samples = read_recording(args.recording)
@@ -155,6 +220,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             warn_about_timing(args.baseline, baseline)
             baseline_mean = mean_raw(baseline)
         windows = calculate_windows(samples, args.window_seconds, args.step_seconds, baseline_mean)
+        converted = None
+        if args.calibration_adc is not None:
+            converted = estimate_windows(
+                samples, windows, args.calibration_adc,
+                baseline if args.baseline is not None else None,
+            )
 
         elapsed = samples[-1].pc_seconds - samples[0].pc_seconds
         print(f"Recording: {args.recording} ({len(samples)} samples over {elapsed:.4f} s)")
@@ -172,8 +243,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if baseline_mean is not None:
                     line += f" | {format_mean(window.difference_from_baseline_raw)}"
                 print(line)
+        if converted is not None:
+            print("WARNING: conductance estimates use an unverified provisional calibration; not validated absolute EDA/arousal.")
+            print(f"Unworn reference: {args.calibration_adc} ADC (10-bit). ADC >= reference yields no estimate.")
+            for window in converted:
+                print(
+                    f"{window.start_s:.4f}-{window.end_s:.4f}s: "
+                    f"mean estimated conductance {format_mean(window.mean_estimated_conductance_us)} µS; "
+                    f"valid={window.valid_conductance_samples}, invalid={window.invalid_conductance_samples}"
+                )
         if args.export:
             print(f"Window CSV: {export_windows(args.recording, windows)}")
+            if converted is not None:
+                print(f"Optional estimates CSV: {export_estimated_windows(args.recording, converted)}")
     except (OSError, ValueError, csv.Error) as error:
         parser.exit(1, f"Error: {error}\n")
     return 0
